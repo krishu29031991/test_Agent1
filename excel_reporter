@@ -1,0 +1,107 @@
+# src/excel_reporter.py
+import pandas as pd
+from typing import Dict, List, Any
+from datetime import datetime
+
+class ExcelReporter:
+    """Generates detailed Excel reports with multiple sheets."""
+    
+    def __init__(self, config: Dict):
+        self.config = config
+    
+    def generate_report(self, results: pd.DataFrame, mappings: List[Dict], 
+                       resolutions: List[Dict], lookups: Dict, 
+                       join_conditions: List[str]) -> str:
+        """Generate comprehensive Excel report."""
+        
+        output_path = self.config['output']['excel_report']
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Sheet 1: Executive Summary
+            self._write_summary_sheet(writer, results, mappings, resolutions)
+            
+            # Sheet 2: Issue Details
+            if not results.empty:
+                results.to_excel(writer, sheet_name='Issues_Details', index=False)
+            
+            # Sheet 3: Schema Resolution (shows fuzzy matching results)
+            pd.DataFrame(resolutions).to_excel(writer, sheet_name='Schema_Resolution', index=False)
+            
+            # Sheet 4: All Mappings (with resolution status)
+            pd.DataFrame(mappings).to_excel(writer, sheet_name='All_Mappings', index=False)
+            
+            # Sheet 5: Lookup Definitions
+            pd.DataFrame(lookups).T.to_excel(writer, sheet_name='Lookups', index=True)
+            
+            # Sheet 6: Join Conditions
+            pd.DataFrame({'Join_Condition': join_conditions}).to_excel(writer, sheet_name='Join_Conditions', index=False)
+            
+            # Sheet 7: Configuration Summary
+            self._write_config_sheet(writer)
+        
+        return output_path
+    
+    def _write_summary_sheet(self, writer, results: pd.DataFrame, 
+                             mappings: List[Dict], resolutions: List[Dict]):
+        """Write executive summary sheet."""
+        total_mappings = len(mappings)
+        resolved_tables = sum(1 for r in resolutions if r.get('actual_table'))
+        resolved_columns = sum(1 for r in resolutions if r.get('actual_column'))
+        
+        summary_data = {
+            'Metric': [
+                'Validation Run Date',
+                'Environment',
+                'Source Project',
+                'Source Dataset',
+                'Target Project',
+                'Target Dataset',
+                'Total Mappings',
+                'Tables Resolved',
+                'Columns Resolved',
+                'Resolution Rate',
+                'Issues Found',
+                'Special Character Replacement',
+                'Fuzzy Matching Threshold'
+            ],
+            'Value': [
+                self.config.get('run_date', datetime.now().strftime('%Y-%m-%d')),
+                self.config.get('environment', 'N/A'),
+                self.config['source']['project_id'],
+                self.config['source']['dataset'],
+                self.config['target']['project_id'],
+                self.config['target']['dataset'],
+                total_mappings,
+                resolved_tables,
+                resolved_columns,
+                f"{(resolved_tables/total_mappings)*100:.1f}%",
+                len(results),
+                self._get_replacement_summary(),
+                f"{self.config['fuzzy_match']['threshold']}%"
+            ]
+        }
+        
+        df = pd.DataFrame(summary_data)
+        df.to_excel(writer, sheet_name='Summary', index=False)
+    
+    def _write_config_sheet(self, writer):
+        """Write configuration sheet."""
+        config_data = []
+        
+        def flatten_dict(d, prefix=''):
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    flatten_dict(v, f"{prefix}{k}.")
+                else:
+                    config_data.append({'Parameter': f"{prefix}{k}", 'Value': str(v)})
+        
+        flatten_dict(self.config)
+        pd.DataFrame(config_data).to_excel(writer, sheet_name='Configuration', index=False)
+    
+    def _get_replacement_summary(self) -> str:
+        special = self.config.get('special_characters', {})
+        if not special.get('enabled'):
+            return "None"
+        replacements = special.get('replacements', [])
+        active = [f"{r['character']}→{r['replace_with']}" for r in replacements if r.get('apply_to_all_tables')]
+        return ", ".join(active) if active else "None"
