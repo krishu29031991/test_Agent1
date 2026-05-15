@@ -1,0 +1,19 @@
+etl_validator/
+├── config/
+│   ├── default.yaml           # Default configuration
+│   ├── prod_banking.yaml      # Environment-specific config
+│   ├── dev_banking.yaml
+│   └── transformations.yaml   # Reusable transformation rules
+├── src/
+│   ├── __init__.py
+│   ├── config_loader.py
+│   ├── schema_discovery.py
+│   ├── fuzzy_matcher.py
+│   ├── sql_builder.py
+│   ├── special_char_handler.py
+│   ├── validation_engine.py
+│   └── excel_reporter.py
+├── mappings/
+│   └── mapping.xlsx
+├── main.py
+└── requirements.txt
