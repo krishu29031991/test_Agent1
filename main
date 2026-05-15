@@ -1,0 +1,273 @@
+# main.py
+#!/usr/bin/env python3
+"""
+Parameterized ETL Validation Framework for GCP
+Handles 100+ mappings, multiple datasets, dynamic suffixes,
+special characters across all tables, fuzzy matching, and detailed Excel reports.
+"""
+
+import os
+import yaml
+import pandas as pd
+from datetime import datetime
+from google.cloud import bigquery
+from google.oauth2 import service_account
+from typing import Dict, List, Any
+
+from src.special_char_handler import SpecialCharacterHandler
+from src.schema_discovery import SchemaDiscovery
+from src.fuzzy_matcher import FuzzyColumnMatcher
+from src.sql_builder import SQLBuilder
+from src.excel_reporter import ExcelReporter
+
+class ETLValidator:
+    """Fully parameterized ETL validation framework."""
+    
+    def __init__(self, config_path: str, source_name: str = None, key_path: str = None):
+        """
+        Initialize validator with configuration.
+        
+        Args:
+            config_path: Path to YAML config file
+            source_name: Which source configuration to use (for multi-source)
+            key_path: Path to service account key JSON (optional)
+        """
+        self.config = self._load_config(config_path, source_name)
+        self.key_path = key_path
+        self.client = self._create_client()
+        
+        # Initialize components
+        self.special_char_handler = SpecialCharacterHandler(self.config)
+        self.schema_discovery = SchemaDiscovery(self.client, self.config)
+        self.column_matcher = FuzzyColumnMatcher(self.config)
+        self.sql_builder = SQLBuilder(self.config, self.special_char_handler, 
+                                       self.schema_discovery, self.column_matcher)
+        self.reporter = ExcelReporter(self.config)
+        
+        print("=" * 70)
+        print(f"ETL Validator Initialized")
+        print(f"  Environment: {self.config.get('environment', 'default')}")
+        print(f"  Source: {self.config['source']['project_id']}.{self.config['source']['dataset']}")
+        print(f"  Target: {self.config['target']['project_id']}.{self.config['target']['dataset']}")
+        print(f"  Special char replacement: {self._get_replacement_summary()}")
+        print(f"  Fuzzy matching threshold: {self.config['fuzzy_match']['threshold']}%")
+        print("=" * 70)
+    
+    def _load_config(self, config_path: str, source_name: str = None) -> Dict:
+        """Load and merge configuration."""
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # If multi-source and specific source requested
+        if source_name and 'sources' in config and source_name in config['sources']:
+            source_config = config['sources'][source_name]
+            # Merge with base config (source_config overrides)
+            for key in ['source', 'target']:
+                if key in source_config:
+                    config[key] = source_config[key]
+        
+        # Expand environment variables
+        config = self._expand_env_vars(config)
+        
+        # Set run date if not specified
+        if not config.get('run_date'):
+            config['run_date'] = datetime.now().strftime('%Y-%m-%d')
+        
+        return config
+    
+    def _expand_env_vars(self, config: Dict) -> Dict:
+        """Expand ${ENV_VAR} placeholders."""
+        if isinstance(config, dict):
+            return {k: self._expand_env_vars(v) for k, v in config.items()}
+        elif isinstance(config, list):
+            return [self._expand_env_vars(item) for item in config]
+        elif isinstance(config, str) and config.startswith('${') and config.endswith('}'):
+            env_var = config[2:-1]
+            return os.environ.get(env_var, config)
+        return config
+    
+    def _create_client(self):
+        """Create BigQuery client."""
+        project_id = self.config['source']['project_id']
+        if self.key_path and os.path.exists(self.key_path):
+            credentials = service_account.Credentials.from_service_account_file(self.key_path)
+            return bigquery.Client(project=project_id, credentials=credentials)
+        return bigquery.Client(project=project_id)
+    
+    def _get_replacement_summary(self) -> str:
+        """Get summary of special character replacements."""
+        special_config = self.config.get('special_characters', {})
+        if not special_config.get('enabled', False):
+            return "Disabled"
+        
+        replacements = special_config.get('replacements', [])
+        active = [f"'{r['character']}'→'{r['replace_with']}'" for r in replacements if r.get('apply_to_all_tables', False)]
+        return ", ".join(active) if active else "None"
+    
+    def validate(self, mapping_file: str) -> Dict:
+        """Run complete validation."""
+        print("\n📋 Step 1: Reading mapping file...")
+        mappings_df = pd.read_excel(mapping_file, sheet_name=self.config['join_settings']['mapping_sheet'])
+        join_df = pd.read_excel(mapping_file, sheet_name=self.config['join_settings']['inner_join_sheet'])
+        lookups_df = pd.read_excel(mapping_file, sheet_name=self.config['join_settings']['lookup_sheet'])
+        
+        mappings = mappings_df.to_dict('records')
+        join_conditions = join_df.iloc[:, 0].dropna().tolist()
+        if join_conditions and join_conditions[0] == 'FILTER':
+            join_conditions = join_conditions[1:]
+        
+        lookups = {}
+        for _, row in lookups_df.iterrows():
+            if pd.notna(row.get('Lookup Name')):
+                lookups[row['Lookup Name']] = {
+                    'lookup_table': str(row.get('Lookup Table', '')),
+                    'lookup_join': str(row.get('Lookup Join', '')),
+                    'lookup_constraint': str(row.get('Lookup Constraint', ''))
+                }
+        
+        print(f"   Mappings: {len(mappings)}")
+        print(f"   Join conditions: {len(join_conditions)}")
+        print(f"   Lookups: {len(lookups)}")
+        
+        print("\n🔍 Step 2: Resolving tables and columns...")
+        resolved_mappings, resolutions = self._resolve_schema(mappings)
+        
+        print("\n🔧 Step 3: Building validation SQL...")
+        query = self.sql_builder.build_validation_query(
+            resolved_mappings, join_conditions, lookups
+        )
+        
+        # Save query for debugging
+        with open("generated_validation.sql", "w") as f:
+            f.write(query)
+        print("   SQL saved to generated_validation.sql")
+        
+        print("\n🚀 Step 4: Executing validation on GCP...")
+        try:
+            results = self.client.query(query).to_dataframe()
+            print(f"   Found {len(results)} rows with issues")
+        except Exception as e:
+            print(f"   ❌ Query failed: {e}")
+            results = pd.DataFrame()
+        
+        print("\n📊 Step 5: Generating Excel report...")
+        report_path = self.reporter.generate_report(
+            results, resolved_mappings, resolutions, lookups, join_conditions
+        )
+        
+        # Print summary
+        self._print_summary(results, len(mappings), resolutions)
+        
+        return {
+            'results': results,
+            'report_path': report_path,
+            'total_mappings': len(mappings),
+            'resolved_tables': sum(1 for r in resolutions if r.get('actual_table')),
+            'mismatch_count': len(results)
+        }
+    
+    def _resolve_schema(self, mappings: List[Dict]) -> tuple:
+        """Resolve tables and columns with fuzzy matching."""
+        resolved = []
+        resolutions = []
+        
+        for mapping in mappings:
+            source_table = mapping.get('Source Table/Lookup')
+            source_col = mapping.get('Source Column')
+            target_col = mapping.get('Target Column')
+            
+            resolution = {
+                'logical_table': source_table,
+                'logical_column': source_col,
+                'target_column': target_col
+            }
+            
+            # Skip lookups for table resolution
+            if source_table and 'Lookup' not in str(source_table):
+                actual_table, match_type, confidence = self.schema_discovery.find_actual_table(source_table)
+                resolution['actual_table'] = actual_table
+                resolution['table_match_type'] = match_type
+                resolution['table_confidence'] = confidence
+                
+                if actual_table:
+                    actual_columns = list(self.schema_discovery.get_columns(actual_table).keys())
+                    actual_col, col_conf, col_type = self.column_matcher.match(source_col, actual_columns)
+                    resolution['actual_column'] = actual_col
+                    resolution['column_confidence'] = col_conf
+                    resolution['column_match_type'] = col_type
+                    
+                    mapping['resolved_table'] = actual_table
+                    mapping['resolved_column'] = actual_col
+                else:
+                    mapping['resolved_table'] = None
+                    mapping['resolved_column'] = None
+            else:
+                mapping['resolved_table'] = None
+                mapping['resolved_column'] = None
+                resolution['table_match_type'] = 'lookup'
+            
+            resolved.append(mapping)
+            resolutions.append(resolution)
+        
+        return resolved, resolutions
+    
+    def _print_summary(self, results: pd.DataFrame, total_mappings: int, resolutions: List[Dict]):
+        """Print validation summary."""
+        print("\n" + "=" * 70)
+        print("VALIDATION SUMMARY")
+        print("=" * 70)
+        
+        resolved_tables = sum(1 for r in resolutions if r.get('actual_table'))
+        resolved_columns = sum(1 for r in resolutions if r.get('actual_column'))
+        
+        print(f"Total mappings:        {total_mappings}")
+        print(f"Tables resolved:       {resolved_tables}/{total_mappings}")
+        print(f"Columns resolved:      {resolved_columns}/{total_mappings}")
+        print(f"Special char handling: {self._get_replacement_summary()}")
+        print("-" * 70)
+        
+        if not results.empty:
+            missing_source = len(results[results['validation_status'] == 'MISSING_IN_SOURCE']) if 'validation_status' in results.columns else 0
+            missing_target = len(results[results['validation_status'] == 'MISSING_IN_TARGET']) if 'validation_status' in results.columns else 0
+            mismatches = len(results) - missing_source - missing_target
+            
+            print(f"Missing in source:     {missing_source}")
+            print(f"Missing in target:     {missing_target}")
+            print(f"Value mismatches:      {mismatches}")
+            print(f"Total issues:          {len(results)}")
+        else:
+            print("✅ No issues found! All data matches.")
+        
+        print("=" * 70)
+
+
+def main():
+    """Entry point with command-line argument support."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='ETL Validation Framework')
+    parser.add_argument('--config', default='config/default.yaml', help='Config file path')
+    parser.add_argument('--mapping', required=True, help='Mapping Excel file path')
+    parser.add_argument('--source', help='Source name (for multi-source config)')
+    parser.add_argument('--key', help='Service account key path')
+    parser.add_argument('--suffix', help='Override table suffix')
+    parser.add_argument('--run-date', help='Override run date')
+    
+    args = parser.parse_args()
+    
+    # Override with CLI args
+    if args.suffix:
+        os.environ['TABLE_SUFFIX_OVERRIDE'] = args.suffix
+    if args.run_date:
+        os.environ['RUN_DATE_OVERRIDE'] = args.run_date
+    
+    # Run validation
+    validator = ETLValidator(args.config, args.source, args.key)
+    results = validator.validate(args.mapping)
+    
+    print(f"\n✅ Validation complete!")
+    print(f"📄 Report saved to: {results['report_path']}")
+
+
+if __name__ == "__main__":
+    main()
