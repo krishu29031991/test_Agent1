@@ -1,0 +1,92 @@
+# src/special_char_handler.py
+"""
+Handles special character replacement for ALL tables automatically.
+Supports global and per-table configurations.
+"""
+
+import re
+from typing import Dict, List, Any, Optional
+
+class SpecialCharacterHandler:
+    """Automatically applies character replacements to all tables based on config."""
+    
+    def __init__(self, config: Dict):
+        self.config = config
+        self.global_replacements = []
+        self.table_specific = config.get('table_specific_replacements', {})
+        
+        # Load global replacements
+        special_config = config.get('special_characters', {})
+        if special_config.get('enabled', False):
+            for replacement in special_config.get('replacements', []):
+                if replacement.get('apply_to_all_tables', False):
+                    self.global_replacements.append({
+                        'character': replacement['character'],
+                        'replace_with': replacement['replace_with']
+                    })
+    
+    def get_replacement_sql(self, column_name: str, table_name: str = None) -> str:
+        """
+        Generate SQL REPLACE statements for a column.
+        Automatically applies global replacements to ALL columns.
+        
+        Args:
+            column_name: The column to apply replacements to
+            table_name: Optional table name for per-table overrides
+            
+        Returns:
+            SQL expression with nested REPLACE functions
+        """
+        replacements_to_apply = []
+        
+        # 1. Add global replacements (apply to all tables)
+        replacements_to_apply.extend(self.global_replacements)
+        
+        # 2. Add table-specific replacements (if table matches)
+        if table_name and table_name in self.table_specific:
+            for replacement in self.table_specific[table_name]:
+                if 'apply_to_columns' not in replacement or column_name in replacement['apply_to_columns']:
+                    replacements_to_apply.append({
+                        'character': replacement['character'],
+                        'replace_with': replacement['replace_with']
+                    })
+        
+        if not replacements_to_apply:
+            return column_name
+        
+        # Build nested REPLACE functions
+        # Example: REPLACE(REPLACE(column, '~', ''), '|', ',')
+        sql = column_name
+        for replacement in replacements_to_apply:
+            char = replacement['character']
+            replace_with = replacement['replace_with']
+            sql = f"REPLACE({sql}, '{char}', '{replace_with}')"
+        
+        return sql
+    
+    def get_join_condition_with_replacement(self, left_col: str, right_col: str, 
+                                            left_table: str = None, right_table: str = None) -> str:
+        """
+        Generate join condition with special character handling.
+        Automatically applies replacements to both sides of the join.
+        """
+        left_expr = self.get_replacement_sql(left_col, left_table)
+        right_expr = self.get_replacement_sql(right_col, right_table)
+        return f"{left_expr} = {right_expr}"
+    
+    def get_where_clause_with_replacement(self, condition: str, table_name: str = None) -> str:
+        """
+        Apply special character replacement to WHERE clause conditions.
+        Automatically finds and replaces column references.
+        """
+        # Pattern to match column names in conditions (simplified)
+        # For production, use proper SQL parsing
+        column_pattern = re.compile(r'(\w+)\.(\w+)')
+        
+        def replace_column(match):
+            table_alias = match.group(1)
+            col_name = match.group(2)
+            replacement_expr = self.get_replacement_sql(col_name, table_name)
+            return f"{table_alias}.{replacement_expr}"
+        
+        return column_pattern.sub(replace_column, condition)
