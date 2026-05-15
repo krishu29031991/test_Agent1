@@ -1,0 +1,90 @@
+# src/schema_discovery.py
+from google.cloud import bigquery
+from typing import List, Dict, Tuple, Optional
+from rapidfuzz import fuzz, process
+
+class SchemaDiscovery:
+    """Discovers tables and columns with automatic suffix handling."""
+    
+    def __init__(self, client: bigquery.Client, config: Dict):
+        self.client = client
+        self.config = config
+        self.table_suffixes = config['source'].get('table_suffixes', [''])
+        self.fuzzy_threshold = config['fuzzy_match'].get('table_match_threshold', 80)
+        self._table_cache = {}
+        self._column_cache = {}
+        self._all_tables_cache = None
+    
+    def find_actual_table(self, logical_name: str) -> Tuple[Optional[str], str, int]:
+        """
+        Find actual table by trying suffixes in order.
+        Returns: (actual_name, match_type, confidence)
+        """
+        if logical_name in self._table_cache:
+            return self._table_cache[logical_name]
+        
+        # Clean the logical name (remove any schema prefix)
+        clean_name = logical_name.split('.')[-1] if '.' in logical_name else logical_name
+        
+        # 1. Try exact match first
+        if self._table_exists(clean_name):
+            self._table_cache[clean_name] = (clean_name, "exact", 100)
+            return clean_name, "exact", 100
+        
+        # 2. Try each suffix in order
+        for suffix in self.table_suffixes:
+            candidate = f"{clean_name}{suffix}"
+            if self._table_exists(candidate):
+                self._table_cache[clean_name] = (candidate, f"suffix:{suffix}", 100)
+                return candidate, f"suffix:{suffix}", 100
+        
+        # 3. Try fuzzy matching as last resort
+        all_tables = self._list_all_tables()
+        result = process.extractOne(clean_name, all_tables, scorer=fuzz.ratio)
+        if result and result[1] >= self.fuzzy_threshold:
+            self._table_cache[clean_name] = (result[0], f"fuzzy:{result[1]}", result[1])
+            return result[0], f"fuzzy:{result[1]}", result[1]
+        
+        self._table_cache[clean_name] = (None, "not_found", 0)
+        return None, "not_found", 0
+    
+    def get_columns(self, table_name: str) -> Dict[str, Dict]:
+        """Get all columns with their data types and modes."""
+        if table_name in self._column_cache:
+            return self._column_cache[table_name]
+        
+        source_config = self.config['source']
+        query = f"""
+            SELECT 
+                column_name, 
+                data_type, 
+                is_nullable
+            FROM `{source_config['project_id']}.{source_config['dataset']}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name = '{table_name}'
+        """
+        df = self.client.query(query).to_dataframe()
+        result = df.set_index('column_name').to_dict('index')
+        self._column_cache[table_name] = result
+        return result
+    
+    def _table_exists(self, table_name: str) -> bool:
+        try:
+            source_config = self.config['source']
+            self.client.get_table(f"{source_config['project_id']}.{source_config['dataset']}.{table_name}")
+            return True
+        except Exception:
+            return False
+    
+    def _list_all_tables(self) -> List[str]:
+        if self._all_tables_cache is not None:
+            return self._all_tables_cache
+        
+        source_config = self.config['source']
+        query = f"""
+            SELECT table_name
+            FROM `{source_config['project_id']}.{source_config['dataset']}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+        """
+        df = self.client.query(query).to_dataframe()
+        self._all_tables_cache = df['table_name'].tolist()
+        return self._all_tables_cache
