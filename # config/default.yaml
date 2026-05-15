@@ -1,0 +1,95 @@
+# config/default.yaml
+# This is the master configuration - all parameters go here
+
+# Environment settings
+environment: "prod"
+run_date: "2026-05-15"
+previous_working_day: "2026-05-14"
+
+# Source connection
+source:
+  project_id: "${GCP_PROJECT_ID}"  # Can be overridden by env var
+  dataset: "HDS_OWNER"
+  table_suffixes: ["", "_bq_load", "_ods", "_hist", "_raw"]  # Tried in order
+  
+# Target connection  
+target:
+  project_id: "${GCP_PROJECT_ID}"
+  dataset: "MI_OWNER"
+  table_name: "RAYT_FMD_CONSOLIDATED"
+  snapshot_column: "snapshot_date"
+
+# Special character handling - APPLIES TO ALL TABLES AUTOMATICALLY
+special_characters:
+  enabled: true
+  replacements:
+    - character: "~"
+      replace_with: ""
+      apply_to_all_tables: true  # Global setting
+    # Add more as needed
+    # - character: "|"
+    #   replace_with: ","
+    #   apply_to_all_tables: true
+    # - character: "\t"
+    #   replace_with: " "
+    #   apply_to_all_tables: true
+
+# Per-table special character overrides (if needed)
+table_specific_replacements:
+  # Example: only apply to specific tables
+  # SUMT_DMENV:
+  #   - character: "~"
+  #     replace_with: ""
+  #     apply_to_columns: ["TRADEID", "TRADE_ID"]
+
+# Fuzzy matching settings
+fuzzy_match:
+  enabled: true
+  threshold: 80  # 0-100, higher = stricter
+  table_match_threshold: 85  # Separate for tables
+  column_match_threshold: 75  # Separate for columns
+
+# Join settings
+join_settings:
+  inner_join_sheet: "Table join"      # Sheet name for INNER JOIN conditions
+  lookup_sheet: "Lookups"             # Sheet name for LEFT JOIN definitions
+  mapping_sheet: "Mapping"            # Sheet name for column mappings
+
+# Validation settings
+validation:
+  max_mismatch_rows: 5000
+  batch_size: 1000
+  compare_all_columns: true
+  
+# Output settings
+output:
+  excel_report: "validation_report.xlsx"
+  include_generated_sql: true
+  include_debug_logs: true
+  detailed_column_comparison: true
+
+# Multi-source support - define multiple source configurations
+sources:
+  banking_prod:
+    source:
+      project_id: "banking-prod"
+      dataset: "HDS_OWNER"
+    target:
+      project_id: "banking-prod"
+      dataset: "MI_OWNER"
+      
+  banking_dev:
+    source:
+      project_id: "banking-dev"
+      dataset: "HDS_OWNER_DEV"
+    target:
+      project_id: "banking-dev"
+      dataset: "MI_OWNER_DEV"
+      
+  lending_prod:
+    source:
+      project_id: "lending-prod"
+      dataset: "LND_SOURCE"
+    target:
+      project_id: "lending-prod"
+      dataset: "LND_TARGET"
