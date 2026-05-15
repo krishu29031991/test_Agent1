@@ -1,0 +1,46 @@
+# src/fuzzy_matcher.py
+from rapidfuzz import fuzz, process
+from typing import List, Tuple, Optional, Dict
+
+class FuzzyColumnMatcher:
+    """Matches columns with fuzzy logic - fully parametric."""
+    
+    def __init__(self, config: Dict):
+        self.threshold = config['fuzzy_match'].get('column_match_threshold', 75)
+        self.enabled = config['fuzzy_match'].get('enabled', True)
+        self._cache = {}
+    
+    def match(self, expected: str, actual_columns: List[str]) -> Tuple[Optional[str], int, str]:
+        """
+        Match expected column name to actual columns.
+        Returns: (matched_column, confidence, match_type)
+        """
+        if not expected or expected == 'nan':
+            return None, 0, "no_column"
+        
+        # Check cache
+        cache_key = f"{expected}_{sorted(actual_columns)}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        
+        # 1. Exact match (case-sensitive)
+        if expected in actual_columns:
+            self._cache[cache_key] = (expected, 100, "exact")
+            return expected, 100, "exact"
+        
+        # 2. Case-insensitive exact match
+        expected_lower = expected.lower()
+        for col in actual_columns:
+            if col.lower() == expected_lower:
+                self._cache[cache_key] = (col, 98, "case_insensitive")
+                return col, 98, "case_insensitive"
+        
+        # 3. Fuzzy match (if enabled)
+        if self.enabled:
+            result = process.extractOne(expected, actual_columns, scorer=fuzz.token_sort_ratio)
+            if result and result[1] >= self.threshold:
+                self._cache[cache_key] = (result[0], result[1], f"fuzzy:{result[1]}")
+                return result[0], result[1], f"fuzzy:{result[1]}"
+        
+        self._cache[cache_key] = (None, 0, "not_found")
+        return None, 0, "not_found"
